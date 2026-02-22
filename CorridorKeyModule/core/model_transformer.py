@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import timm
-import math
+
 from .point_rend import PointRendModule, point_sample, calculate_uncertainty
 
 class MLP(nn.Module):
@@ -154,63 +154,11 @@ class GreenFormer(nn.Module):
         except Exception as e:
             print(f"Warning: Could not enable Gradient Checkpointing: {e}")
         
-        # 2. Load Source Weights (224x224)
-        print(f"Loading pretrained weights to resize PosEmbed...")
-        # We load a standard model to get the clean state_dict
-        src_model = timm.create_model(encoder_name, pretrained=True, img_size=224)
-        state_dict = src_model.state_dict()
-        if 'pos_embed' in state_dict:
-            # Resize PosEmbed (Bicubic + Dampening) as requested
-            pos_embed = state_dict['pos_embed'] # [1, N, C]
-            N = pos_embed.shape[1]
-            C = pos_embed.shape[2]
-            
-            # Assume constant patch size (Hiera default stride is 4 for patch_embed)
-            grid_size = int(math.sqrt(N))
-            print(f"Resizing PosEmbed from {grid_size}x{grid_size} to {img_size//4}x{img_size//4}...")
-            
-            # 1. Calc Stats of Original
-            orig_mean = pos_embed.mean()
-            orig_std = pos_embed.std()
-            print(f"Original PosEmbed Stats: Mean={orig_mean:.4f}, Std={orig_std:.4f}")
-
-            # Reshape to [1, C, H, W] for interpolate
-            pos_embed = pos_embed.permute(0, 2, 1).view(1, C, grid_size, grid_size)
-            
-            # Target Grid
-            target_grid = img_size // 4
-            
-            # 2. Bicubic Interpolation (Smoother than Bilinear for 36x upsample)
-            pos_embed = F.interpolate(pos_embed, size=(target_grid, target_grid), mode='bicubic', align_corners=False)
-            
-            # 3. Dampening Strategy (User: "Limit output")
-            # A. Clamp to specific sigma range (Kill Spikes)
-            limit = 3.0 * orig_std
-            pos_embed = torch.clamp(pos_embed, orig_mean - limit, orig_mean + limit)
-            
-            # B. Global Scaling (Reduce Influence)
-            pos_embed = pos_embed * 0.5 
-            
-            print(f"Resized PosEmbed Dampened: Clamped to +/- {limit:.4f}, Scaled by 0.5")
-
-            # Reshape back to [1, N_new, C]
-            pos_embed = pos_embed.flatten(2).transpose(1, 2)
-            
-            state_dict['pos_embed'] = pos_embed
-        
-        # 4. Load into Encoder
-        # Because self.encoder is FeatureGetterNet, keys might need 'model.' prefix
-        # We check one key to see.
-        encoder_keys = list(self.encoder.state_dict().keys())
-        if encoder_keys[0].startswith('model.'):
-            # Prefix keys
-            new_state_dict = {}
-            for k, v in state_dict.items():
-                new_state_dict[f"model.{k}"] = v
-            state_dict = new_state_dict
-            
-        keys = self.encoder.load_state_dict(state_dict, strict=False)
-        print(f"Weights Loaded. Missing: {len(keys.missing_keys)}, Unexpected: {len(keys.unexpected_keys)}")
+        # 2. Pretrained Weights (SKIPPED)
+        # We skip downloading/loading base weights because the user's checkpoint 
+        # (loaded immediately after this) contains all weights, including correctly 
+        # trained/sized PosEmbeds. This keeps the project offline-capable using only local assets.
+        print("Skipped downloading base weights (relying on custom checkpoint).")
         
         # Patch First Layer for 4 channels
         if in_channels != 3:

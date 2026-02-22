@@ -907,9 +907,12 @@ class VideoInferencePipeline:
             first_frame_tensor = cond_video_tensor[:, 0, :, :, :]
             pixel_values_for_clip = self._resize_with_antialiasing(first_frame_tensor, (224, 224))
             pixel_values_for_clip = ((pixel_values_for_clip + 1.0) / 2.0).clamp(0, 1)
-            pixel_values = self.feature_extractor(images=pixel_values_for_clip, return_tensors="pt").pixel_values
+            pixel_values = self.feature_extractor(images=pixel_values_for_clip, do_rescale=False, return_tensors="pt").pixel_values
             # Run CLIP in FP32
             image_embeddings = self.image_encoder(pixel_values.to(self.device, dtype=torch.float32)).image_embeds
+            
+            print(f"DEBUG: CLIP Embeds Max: {image_embeddings.max().item():.4f}, Mean: {image_embeddings.mean().item():.4f}")
+
             # Setup for UNet which uses weight_dtype (likely FP16)
             image_embeddings = image_embeddings.to(dtype=self.weight_dtype)
             encoder_hidden_states = torch.zeros_like(image_embeddings).unsqueeze(1)
@@ -918,6 +921,9 @@ class VideoInferencePipeline:
             # VAE encoding must happen in FP32
             cond_video_tensor_fp32 = cond_video_tensor.to(dtype=torch.float32)
             cond_latents = self._tensor_to_vae_latent(cond_video_tensor_fp32)
+            
+            print(f"DEBUG: Cond Latents Max: {cond_latents.max().item():.4f}, Mean: {cond_latents.mean().item():.4f}")
+
             # Cast back to weight_dtype (FP16) for UNet
             cond_latents = cond_latents.to(dtype=self.weight_dtype)
             cond_latents = cond_latents / self.vae.config.scaling_factor
@@ -925,6 +931,7 @@ class VideoInferencePipeline:
             if mask_cond_mode == "vae":
                 mask_video_tensor_fp32 = mask_video_tensor.to(dtype=torch.float32)
                 mask_latents = self._tensor_to_vae_latent(mask_video_tensor_fp32)
+                print(f"DEBUG: Mask Latents Max: {mask_latents.max().item():.4f}, Mean: {mask_latents.mean().item():.4f}")
                 mask_latents = mask_latents.to(dtype=self.weight_dtype)
                 mask_latents = mask_latents / self.vae.config.scaling_factor
             elif mask_cond_mode == "interpolate":
@@ -946,6 +953,8 @@ class VideoInferencePipeline:
 
             unet_input = torch.cat([noisy_latents, cond_latents, mask_latents], dim=2)
             pred_latents = self.unet(unet_input, timesteps, encoder_hidden_states, added_time_ids=added_time_ids).sample
+            
+            print(f"DEBUG: Pred Latents Max: {pred_latents.max().item():.4f}, Mean: {pred_latents.mean().item():.4f}")
 
             # --- 5. Decode Latents to Video Frames ---
             pred_latents = (1 / self.vae.config.scaling_factor) * pred_latents.squeeze(0)
@@ -960,6 +969,7 @@ class VideoInferencePipeline:
                 frames.append(decoded_chunk)
 
             video_tensor = torch.cat(frames, dim=0)
+            print(f"DEBUG: Video Tensor (Pre-Clamp) Max: {video_tensor.max().item():.4f}, Mean: {video_tensor.mean().item():.4f}")
             video_tensor = (video_tensor / 2.0 + 0.5).clamp(0, 1).mean(dim=1, keepdim=True).repeat(1, 3, 1, 1)
 
             # Return a list of PIL images

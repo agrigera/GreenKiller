@@ -9,6 +9,7 @@ os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 import cv2
 import shutil
 import warnings
+import numpy as np
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -253,24 +254,65 @@ def run_videomama(clips, chunk_size=50):
     """
     Runs VideoMaMa on clips that have MaskHint but NO AlphaHint.
     """
-    clips_to_process = [c for c in clips if c.alpha_asset is None and 
-                        os.path.exists(os.path.join(c.root_path, "MaskHint")) and
-                        len(os.listdir(os.path.join(c.root_path, "MaskHint"))) > 0]
+    # Process if:
+    # 1. Has MaskHint (File or Folder, Case-Insensitive)
+    # 2. AND (Alpha is Missing OR Alpha is a Video File we want to upgrade)
     
+    clips_to_process = []
+    clip_mask_paths = {} # Store the resolved mask path for each clip
+    
+    for c in clips:
+        # Search for 'maskhint' asset (Strict: maskhint.ext or MaskHint/)
+        candidates = []
+        for f in os.listdir(c.root_path):
+             stem, _ = os.path.splitext(f)
+             if stem.lower() == "maskhint":
+                 candidates.append(f)
+        
+        mask_asset_path = None
+        has_mask = False
+        
+        # Priority: Directory > Video File
+        # Check directories first
+        for cand in candidates:
+             path = os.path.join(c.root_path, cand)
+             if os.path.isdir(path) and len(os.listdir(path)) > 0:
+                 has_mask = True
+                 mask_asset_path = path
+                 break 
+        
+        # If no directory, check files
+        if not has_mask:
+            for cand in candidates:
+                path = os.path.join(c.root_path, cand)
+                if os.path.isfile(path) and is_video_file(path):
+                    has_mask = True
+                    mask_asset_path = path
+                    break
+        
+        if not has_mask: continue
+        
+        # Store for later
+        clip_mask_paths[c.name] = mask_asset_path
+
+        if c.alpha_asset is None:
+            clips_to_process.append(c)
+        elif c.alpha_asset.type == 'video':
+            clips_to_process.append(c)
+            
     if not clips_to_process:
-        logger.info("No clips found with MaskHint but missing AlphaHint.")
+        logger.info(f"No candidates for VideoMaMa (looking for MaskHint + [NoAlpha OR VideoAlpha]).")
         return
 
     logger.info(f"Found {len(clips_to_process)} clips for VideoMaMa processing.")
     
-    # Import locally to avoid dependency issues if not installed
+    # Import locally...
     try:
         sys.path.append(os.path.join(BASE_DIR, "VideoMaMaInferenceModule"))
         from VideoMaMaInferenceModule.inference import load_videomama_model, run_inference
         from VideoMaMaInferenceModule.pipeline import VideoInferencePipeline
     except ImportError as e:
         logger.error(f"Failed to import VideoMaMa: {e}")
-        logger.error("Please ensure you have installed usage requirements: pip install -r VideoMaMaInferenceModule/requirements.txt")
         return
 
     import torch
@@ -282,7 +324,10 @@ def run_videomama(clips, chunk_size=50):
     for clip in clips_to_process:
         logger.info(f"Running VideoMaMa on: {clip.name}")
         
-        mask_hint_dir = os.path.join(clip.root_path, "MaskHint")
+        # Retrieve resolved path
+        mask_hint_path = clip_mask_paths[clip.name]
+        logger.info(f"  Using MaskHint: {os.path.basename(mask_hint_path)}")
+        
         alpha_output_dir = os.path.join(clip.root_path, "AlphaHint")
         
         # Load Inputs
@@ -298,54 +343,134 @@ def run_videomama(clips, chunk_size=50):
         else:
             files = sorted([f for f in os.listdir(clip.input_asset.path) if is_image_file(f)])
             for f in files:
-                img = cv2.imread(os.path.join(clip.input_asset.path, f))
+                fpath = os.path.join(clip.input_asset.path, f)
+                # Handle EXR (Float 0-1) vs Standard (Int 0-255)
+                if f.lower().endswith('.exr'):
+                    img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
+                    if img is not None:
+                        # Normalize Float 0-1
+                        img = np.clip(img, 0.0, 1.0)
+                        # Linear -> sRGB (Gamma 2.2 Approximation) for VideoMaMa
+                        img = img ** (1.0/2.2)
+                        # 0-255 uint8
+                        img = (img * 255.0).astype(np.uint8)
+                        # Ensure 3 channels
+                        if img.ndim == 2:
+                            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                        elif img.shape[2] == 4:
+                            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                else:
+                    img = cv2.imread(fpath)
+
                 if img is not None:
+                    if len(input_frames) == 0:
+                        logger.info(f"Debug Input Frame 0 stats: Min={img.min()}, Max={img.max()}, Mean={img.mean()}")
                     input_frames.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
                     
-        # 2. Mask Frames (Grayscale or any, will be converted)
-        mask_files = sorted([f for f in os.listdir(mask_hint_dir) if is_image_file(f)])
+        # 2. Mask Frames
         mask_frames = []
-        for f in mask_files:
-            m = cv2.imread(os.path.join(mask_hint_dir, f), cv2.IMREAD_GRAYSCALE)
-            if m is not None:
-                mask_frames.append(m)
+        
+        # Check if MaskHint is a directory or a file (video)
+        if os.path.isdir(mask_hint_path):
+            # Directory of Images
+            mask_files = sorted([f for f in os.listdir(mask_hint_path) if is_image_file(f)])
+            for f in mask_files:
+                fpath = os.path.join(mask_hint_path, f)
+                m = None
                 
+                # Handle EXR Masks
+                if f.lower().endswith('.exr'):
+                    m = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
+                    if m is not None:
+                        if m.ndim == 3: m = m[:, :, 0]
+                        m = np.clip(m, 0.0, 1.0)
+                        m = (m * 255.0).astype(np.uint8)
+                else:
+                    # Standard Masks
+                    m = cv2.imread(fpath, cv2.IMREAD_GRAYSCALE)
+
+                if m is not None:
+                    # Force Binary Thresholding
+                    _, m = cv2.threshold(m, 10, 255, cv2.THRESH_BINARY)
+                    mask_frames.append(m)
+                    
+        elif os.path.isfile(mask_hint_path):
+             # Handle Video File
+             cap = cv2.VideoCapture(mask_hint_path)
+             while True:
+                 ret, frame = cap.read()
+                 if not ret: break
+                 # Convert to Grayscale
+                 m = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                 # Force Binary Thresholding
+                 _, m = cv2.threshold(m, 10, 255, cv2.THRESH_BINARY)
+                 mask_frames.append(m)
+             cap.release()
+             
+        if mask_frames:
+             m0 = mask_frames[0]
+             logger.info(f"Debug Mask Frame 0 stats (Thresholded): Min={m0.min()}, Max={m0.max()}, Mean={m0.mean()}")
+        
         # Validate Lengths
         num_frames = min(len(input_frames), len(mask_frames))
         input_frames = input_frames[:num_frames]
         mask_frames = mask_frames[:num_frames]
-        
+
         if num_frames == 0:
             logger.error(f"Skipping {clip.name}: No valid frame pairs found.")
             continue
             
         # Run Inference
         try:
-            output_frames_np = run_inference(pipeline, input_frames, mask_frames, chunk_size=chunk_size)
+            # Prepare Output Directory First
+            # Logic: If it exists as a FILE (legacy/error), delete it.
+            if os.path.exists(alpha_output_dir) and not os.path.isdir(alpha_output_dir):
+                logger.warning(f"Removing file '{alpha_output_dir}' to create directory.")
+                os.remove(alpha_output_dir)
             
-            # Save Outputs
-            if os.path.exists(alpha_output_dir):
-                shutil.rmtree(alpha_output_dir)
+            # If there was a Video Alpha Asset (e.g. AlphaHint.mp4), rename it to backup so it doesn't conflict
+            if clip.alpha_asset and clip.alpha_asset.type == 'video':
+                old_path = clip.alpha_asset.path
+                if os.path.exists(old_path):
+                    dir_name = os.path.dirname(old_path)
+                    base, ext = os.path.splitext(os.path.basename(old_path))
+                    backup_path = os.path.join(dir_name, f"{base}_backup{ext}")
+                    logger.info(f"Backing up existing Alpha Video: {os.path.basename(old_path)} -> {os.path.basename(backup_path)}")
+                    os.rename(old_path, backup_path)
+                    # Clear it from memory so we rely on the new one
+                    clip.alpha_asset = None
+
             os.makedirs(alpha_output_dir, exist_ok=True)
             
-            # Name them properly to match input if possible
+            # Name setup
             if clip.input_asset.type == 'sequence':
                  in_names = sorted([os.path.splitext(f)[0] for f in os.listdir(clip.input_asset.path) if is_image_file(f)])
             else:
                  stem = os.path.splitext(os.path.basename(clip.input_asset.path))[0]
                  in_names = [f"{stem}_{i:05d}" for i in range(num_frames)]
-                 
-            for i, frame in enumerate(output_frames_np):
-                if i >= len(in_names): break
-                name = in_names[i]
-                # Save as PNG
-                out_path = os.path.join(alpha_output_dir, f"{name}.png")
-                # output_frames_np is RGB, convert to BGR for cv2
-                cv2.imwrite(out_path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                
-            logger.info(f"Saved {len(output_frames_np)} frames to High-Quality AlphaHint.")
             
-            # Update clip state in memory (dummy)
+            total_saved = 0
+            
+            # Iterate generator
+            for chunk_frames in run_inference(pipeline, input_frames, mask_frames, chunk_size=chunk_size):
+                for frame in chunk_frames:
+                    if total_saved >= len(in_names): break
+                    
+                    if total_saved == 0:
+                        logger.info(f"Debug Output Frame 0 stats: Min={frame.min()}, Max={frame.max()}, Mean={frame.mean()}, Shape={frame.shape}, Dtype={frame.dtype}")
+                    
+                    name = in_names[total_saved]
+                    out_path = os.path.join(alpha_output_dir, f"{name}.png")
+                    
+                    # Convert to BGR and Save
+                    cv2.imwrite(out_path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                    total_saved += 1
+                
+                logger.info(f"  Saved {total_saved}/{num_frames} frames...")
+
+            logger.info(f"VideoMaMa Complete: Saved {total_saved} frames to AlphaHint.")
+            
+            # Update clip state in memory (dummy) - re-scan will pick it up properly
             clip.alpha_asset = ClipAsset(alpha_output_dir, 'sequence')
             
         except Exception as e:
@@ -361,6 +486,47 @@ def run_inference(clips):
         return
 
     logger.info(f"Found {len(ready_clips)} clips ready for inference.")
+    
+    # --- User Prompts ---
+    print("\n--- Inference Settings ---")
+    
+    # 1. Gamma Prompt
+    user_input_is_linear = False
+    gamma_choice = input("Is the input sequence Linear (l) or sRGB (s)? [l/s]: ").strip().lower()
+    if gamma_choice == 'l':
+        user_input_is_linear = True
+        logger.info("User selected: Linear Input")
+    else:
+        logger.info("User selected: sRGB Input (or default)")
+        
+    # 2. Despill Prompt
+    despill_val = input("Enter Despill Strength (0-10, 10 is max despill) [default 10]: ").strip()
+    try:
+        despill_int = int(despill_val)
+        despill_int = max(0, min(10, despill_int))
+    except ValueError:
+        despill_int = 10
+    
+    despill_strength = despill_int / 10.0
+    logger.info(f"User selected: Despill Strength {despill_int}/10 ({despill_strength})")
+    # 3. Auto-Despeckle Prompt
+    auto_despeckle = True
+    despeckle_size = 400
+    despeckle_choice = input("Enable Auto-Despeckle (removes tracking dots in Processed/Comp)? [Y/n]: ").strip().lower()
+    if despeckle_choice == 'n':
+        auto_despeckle = False
+        logger.info("User selected: Auto-Despeckle OFF")
+    else:
+        logger.info("User selected: Auto-Despeckle ON (default)")
+        size_val = input("Enter Auto-Despeckle Size (min pixels for a spot) [default 400]: ").strip()
+        try:
+            val_int = int(size_val)
+            despeckle_size = max(0, val_int)
+        except ValueError:
+            despeckle_size = 400
+        logger.info(f"User selected: Auto-Despeckle Size {despeckle_size}px")
+        
+    print("--------------------------\n")
     
     # Ensure Output Directory exists
     if not os.path.exists(OUTPUT_DIR):
@@ -380,8 +546,9 @@ def run_inference(clips):
         fg_dir = os.path.join(clip_out_root, "FG")
         matte_dir = os.path.join(clip_out_root, "Matte")
         comp_dir = os.path.join(clip_out_root, "Comp")
+        proc_dir = os.path.join(clip_out_root, "Processed")
         
-        for d in [fg_dir, matte_dir, comp_dir]:
+        for d in [fg_dir, matte_dir, comp_dir, proc_dir]:
             os.makedirs(d, exist_ok=True)
             
         num_frames = min(clip.input_asset.frame_count, clip.alpha_asset.frame_count)
@@ -409,13 +576,15 @@ def run_inference(clips):
             img_srgb = None
             input_stem = f"{i:05d}"
             
+            # Use the user-defined gamma
+            input_is_linear = user_input_is_linear
+            
             if input_cap:
                 ret, frame = input_cap.read()
                 if not ret: break
                 img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 img_srgb = img_rgb.astype(np.float32) / 255.0
                 input_stem = f"{i:05d}" 
-                input_is_linear = False 
             else:
                 fpath = os.path.join(clip.input_asset.path, input_files[i])
                 input_stem = os.path.splitext(input_files[i])[0]
@@ -425,15 +594,13 @@ def run_inference(clips):
                     img_linear = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
                     if img_linear is None: continue
                     img_linear_rgb = cv2.cvtColor(img_linear, cv2.COLOR_BGR2RGB)
-                    # Pass as Linear to Engine
-                    img_srgb = np.maximum(img_linear_rgb, 0.0) # Just ensure positive
-                    input_is_linear = True
+                    # Support overriding EXR behavior if user picked 's'
+                    img_srgb = np.maximum(img_linear_rgb, 0.0) 
                 else:
                     img_bgr = cv2.imread(fpath)
                     if img_bgr is None: continue
                     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
                     img_srgb = img_rgb.astype(np.float32) / 255.0
-                    input_is_linear = False
             
             # 2. Read Alpha (Mask)
             mask_linear = None
@@ -467,7 +634,15 @@ def run_inference(clips):
             
             # 3. Process
             USE_STRAIGHT_MODEL = True
-            res = engine.process_frame(img_srgb, mask_linear, input_is_linear=input_is_linear, fg_is_straight=USE_STRAIGHT_MODEL)
+            res = engine.process_frame(
+                img_srgb, 
+                mask_linear, 
+                input_is_linear=input_is_linear, 
+                fg_is_straight=USE_STRAIGHT_MODEL,
+                despill_strength=despill_strength,
+                auto_despeckle=auto_despeckle,
+                despeckle_size=despeckle_size
+            )
             
             pred_fg = res['fg'] # sRGB
             pred_alpha = res['alpha'] # Linear
@@ -477,7 +652,8 @@ def run_inference(clips):
             # Compression Params
             exr_flags = [
                 cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_HALF,
-                cv2.IMWRITE_EXR_COMPRESSION, cv2.IMWRITE_EXR_COMPRESSION_B44A
+                # DWAB fails. PXR24 verified as smallest working format (46KB vs ZIP 56KB vs B44A 688KB)
+                cv2.IMWRITE_EXR_COMPRESSION, cv2.IMWRITE_EXR_COMPRESSION_PXR24,
             ]
             
             # Save FG
@@ -491,31 +667,18 @@ def run_inference(clips):
             cv2.imwrite(os.path.join(matte_dir, f"{input_stem}.exr"), pred_alpha, exr_flags)
             
             # 5. Generate Reference Comp
-            # Linearize FG
-            fg_lin = np.power(np.maximum(pred_fg, 0.0), 2.2)
-            alpha_3c = np.stack([pred_alpha]*3, axis=2)
-            
-            # Neutral Gray BG (Linear)
-            bg_val_lin = np.power(0.5, 2.2) 
-            bg_lin = np.full_like(fg_lin, bg_val_lin)
-            
-            if USE_STRAIGHT_MODEL:
-                # Straight Composite: FG * Alpha + BG * (1 - Alpha)
-                comp_lin = fg_lin * alpha_3c + bg_lin * (1.0 - alpha_3c)
-            else:
-                # Premultiplied Composite: FG + BG * (1 - Alpha)
-                comp_lin = fg_lin + bg_lin * (1.0 - alpha_3c)
-            
-            # Back to sRGB
-            comp_srgb = np.power(np.maximum(comp_lin, 0.0), 1.0/2.2)
-            
+            comp_srgb = res['comp']
             # Save Comp (PNG 8-bit)
-            comp_bg = np.array(bg_val_lin ** (1.0/2.2) * 255.0, dtype=np.uint8) # Back to sRGB 8-bit for debugging
-            
-            # Convert sRGB Float to 8-bit Int
-            comp_srgb_8bit = (np.clip(comp_srgb, 0.0, 1.0) * 255.0).astype(np.uint8)
-            comp_bgr = cv2.cvtColor(comp_srgb_8bit, cv2.COLOR_RGB2BGR)
+            comp_bgr = cv2.cvtColor((np.clip(comp_srgb, 0.0, 1.0) * 255.0).astype(np.uint8), cv2.COLOR_RGB2BGR)
             cv2.imwrite(os.path.join(comp_dir, f"{input_stem}.png"), comp_bgr)
+
+            # 6. Save Processed (RGBA EXR)
+            if 'processed' in res:
+                # Result is RGBA
+                proc_rgba = res['processed']
+                # Convert to BGRA for OpenCV
+                proc_bgra = cv2.cvtColor(proc_rgba, cv2.COLOR_RGBA2BGRA)
+                cv2.imwrite(os.path.join(proc_dir, f"{input_stem}.exr"), proc_bgra, exr_flags)
 
         print("") 
         if input_cap: input_cap.release()
@@ -738,11 +901,21 @@ def interactive_wizard(win_path):
             except:
                 pass # Might act up if Input missing
             
-            # Check MaskHint
-            mask_hint_path = os.path.join(d, "MaskHint")
+            # Check MaskHint (Strict: maskhint.ext or MaskHint/)
             has_mask = False
-            if os.path.isdir(mask_hint_path) and os.listdir(mask_hint_path):
+            mask_dir = os.path.join(d, "MaskHint")
+            
+            # 1. Directory Check
+            if os.path.isdir(mask_dir) and len(os.listdir(mask_dir)) > 0:
                 has_mask = True
+            
+            # 2. File Check (Strict Stem Match)
+            if not has_mask:
+                for f in os.listdir(d):
+                    stem, _ = os.path.splitext(f)
+                    if stem.lower() == "maskhint" and is_video_file(f):
+                        has_mask = True
+                        break
                 
             if entry.alpha_asset:
                 ready.append(entry)

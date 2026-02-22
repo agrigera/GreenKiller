@@ -77,7 +77,7 @@ class CorridorKeyEngine:
         return model
 
     @torch.no_grad()
-    def process_frame(self, image, mask_linear, refiner_scale=1.0, input_is_linear=False, fg_is_straight=True):
+    def process_frame(self, image, mask_linear, refiner_scale=1.0, input_is_linear=False, fg_is_straight=True, despill_strength=1.0, auto_despeckle=True, despeckle_size=400):
         """
         Process a single frame.
         Args:
@@ -90,6 +90,9 @@ class CorridorKeyEngine:
                              If False, resizes in sRGB (standard).
             fg_is_straight: bool. If True, assumes FG output is Straight (unpremultiplied).
                             If False, assumes FG output is Premultiplied.
+            despill_strength: float. 0.0 to 1.0 multiplier for the despill effect.
+            auto_despeckle: bool. If True, cleans up small disconnected components from the predicted alpha matte.
+            despeckle_size: int. Minimum number of consecutive pixels required to keep an island.
         Returns:
              dict: {'alpha': np, 'fg': np (sRGB), 'comp': np (sRGB on Gray)}
         """
@@ -155,22 +158,48 @@ class CorridorKeyEngine:
         res_fg = cv2.resize(res_fg, (w, h), interpolation=cv2.INTER_LANCZOS4)
         
         if res_alpha.ndim == 2: res_alpha = res_alpha[:, :, np.newaxis]
+
+        # --- ADVANCED COMPOSITING ---
         
-        # 7. Composite (on Neutral Gray) for checking
-        # Convert FG to Linear to composite correctly
-        fg_lin = cu.to_linear(res_fg)
-        bg_lin = np.ones_like(fg_lin) * cu.to_linear(0.5) # Middle Gray Linear
+        # A. Clean Matte (Auto-Despeckle)
+        if auto_despeckle:
+            processed_alpha = cu.clean_matte(res_alpha, area_threshold=despeckle_size, dilation=25, blur_size=5)
+        else:
+            processed_alpha = res_alpha
+            
+        # B. Despill FG
+        # res_fg is sRGB.
+        fg_despilled = cu.despill(res_fg, green_limit_mode='average', strength=despill_strength)
+        
+        # C. Premultiply
+        # FG * Alpha
+        fg_premul = cu.premultiply(fg_despilled, processed_alpha)
+        
+        # D. Pack RGBA
+        # [H, W, 4]
+        processed_rgba = np.concatenate([fg_premul, processed_alpha], axis=-1)
+
+        # ----------------------------
+        
+        # 7. Composite (on Checkerboard) for checking
+        # Convert Despilled FG to Linear to composite correctly
+        fg_lin = cu.to_linear(fg_despilled)
+        
+        # Generate Dark/Light Gray Checkerboard (in sRGB, convert to Linear)
+        bg_srgb = cu.create_checkerboard(w, h, checker_size=128, color1=0.15, color2=0.55)
+        bg_lin = cu.to_linear(bg_srgb)
         
         if fg_is_straight:
-             comp_lin = cu.composite_straight(fg_lin, bg_lin, res_alpha) 
+             comp_lin = cu.composite_straight(fg_lin, bg_lin, processed_alpha) 
         else:
              # If premultiplied, we don't multiply by alpha again
-             comp_lin = cu.composite_premul(fg_lin, bg_lin, res_alpha)
+             comp_lin = cu.composite_premul(fg_lin, bg_lin, processed_alpha)
              
         comp_srgb = cu.to_srgb(comp_lin)
         
         return {
-            'alpha': res_alpha, # Linear
-            'fg': res_fg,       # sRGB
-            'comp': comp_srgb   # sRGB
+            'alpha': res_alpha,        # Linear, Raw Prediction
+            'fg': res_fg,              # sRGB, Raw Prediction (Straight)
+            'comp': comp_srgb,         # sRGB, Composite
+            'processed': processed_rgba # sRGB/Premul, RGBA, Garbage Matted & Despilled
         }

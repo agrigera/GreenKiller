@@ -137,9 +137,13 @@ def run_inference(
     masks_resized = [m.resize((target_width, target_height), Image.Resampling.BILINEAR) 
                     for m in mask_frames_pil]
     
-    output_frames_pil = []
-    
     print(f"Processing {len(frames_resized)} frames in chunks of {chunk_size}...")
+    
+    # Store original size for resizing back
+    if not frames_pil:
+        return []
+        
+    original_size = frames_pil[0].size
     
     for i in range(0, len(frames_resized), chunk_size):
         chunk_frames = frames_resized[i:i + chunk_size]
@@ -156,17 +160,15 @@ def run_inference(
             seed=42, # Fixed seed for reproducibility
             mask_cond_mode="vae"
         )
-        output_frames_pil.extend(chunk_output)
-    
-    # Resize back to original resolution
-    original_size = frames_pil[0].size
-    output_frames_resized = [f.resize(original_size, Image.Resampling.BILINEAR) 
-                            for f in output_frames_pil]
-    
-    # Convert back to numpy arrays
-    output_frames_np = [np.array(f) for f in output_frames_resized]
-    
-    return output_frames_np
+        
+        # Resize back to original resolution immediately
+        chunk_output_resized = [f.resize(original_size, Image.Resampling.BILINEAR) 
+                                for f in chunk_output]
+        
+        # Convert back to numpy arrays
+        chunk_output_np = [np.array(f) for f in chunk_output_resized]
+        
+        yield chunk_output_np
 
 def save_video(frames: List[np.ndarray], output_path: str, fps: float):
     """
