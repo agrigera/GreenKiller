@@ -74,6 +74,23 @@ class GVMProcessor:
         self.model_base = model_base
         self.unet_base = unet_base
         self.lora_base = lora_base
+
+        required_files = [
+            osp.join(model_base, "vae", "config.json"),
+            osp.join(model_base, "vae", "diffusion_pytorch_model.safetensors"),
+            osp.join(model_base, "scheduler", "scheduler_config.json"),
+            osp.join(model_base, "unet", "config.json"),
+            osp.join(model_base, "unet", "diffusion_pytorch_model.safetensors"),
+        ]
+        missing_files = [p for p in required_files if not osp.isfile(p)]
+        if missing_files:
+            missing_rel = [osp.relpath(p, model_base) for p in missing_files]
+            raise FileNotFoundError(
+                "Missing GVM weights in '{}' (missing: {}). "
+                "Run Install_GVM_Windows.bat or: uv run hf download geyongtao/gvm --local-dir gvm_core/weights".format(
+                    model_base, ", ".join(missing_rel)
+                )
+            )
         
         if seed is None:
             seed = int(time.time())

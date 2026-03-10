@@ -1,5 +1,10 @@
 @echo off
 TITLE CorridorKey Setup Wizard
+
+:: Always run from the repository root where this script lives
+set "SCRIPT_DIR=%~dp0"
+cd /d "%SCRIPT_DIR%"
+
 echo ===================================================
 echo     CorridorKey - Windows Auto-Installer
 echo ===================================================

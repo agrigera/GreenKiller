@@ -1,5 +1,10 @@
 @echo off
 TITLE GVM Setup Wizard
+
+:: Always run from the repository root where this script lives
+set "SCRIPT_DIR=%~dp0"
+cd /d "%SCRIPT_DIR%"
+
 echo ===================================================
 echo     GVM (AlphaHint Generator) - Auto-Installer
 echo ===================================================
@@ -22,7 +27,7 @@ if %errorlevel% neq 0 (
 )
 
 :: 1. Download Weights (all Python deps are already installed by uv sync)
-echo [1/1] Downloading GVM Model Weights (WARNING: Massive 80GB+ Download)...
+echo [1/1] Downloading GVM Model Weights (approx. 6.5GB download)...
 if not exist "gvm_core\weights" mkdir "gvm_core\weights"
 
 echo Downloading GVM weights from HuggingFace...
