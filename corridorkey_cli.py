@@ -363,6 +363,12 @@ def interactive_wizard(win_path: str, device: str | None = None) -> None:
         )
         process_path = parent_dir
 
+    if not os.path.isdir(process_path):
+        console.print(
+            f"\n[bold red]ERROR:[/bold red] Expected a folder path but received: [bold]{process_path}[/bold]"
+        )
+        raise typer.Exit(code=1)
+
     # 2. Analyze — shot or project?
     target_is_shot = False
     if os.path.exists(os.path.join(process_path, "Input")) or glob.glob(os.path.join(process_path, "Input.*")):

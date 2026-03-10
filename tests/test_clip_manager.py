@@ -58,6 +58,7 @@ class TestFileTypeDetection:
             "CLIP.MOV",
             "take.avi",
             "rushes.mkv",
+            "plate.MXF",
         ],
     )
     def test_video_extensions_recognized(self, filename):

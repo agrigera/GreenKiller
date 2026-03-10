@@ -38,6 +38,21 @@ echo.
 
 :uv_ready
 
+:: 1.5 Check for git (required for git-based dependencies like timm fork)
+where git >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [ERROR] Git is not installed or not available on PATH.
+    echo This installer requires git to fetch dependencies pinned to Git repositories.
+    echo.
+    echo Install Git for Windows and enable "Git from the command line" in PATH,
+    echo then reopen this terminal and run this script again.
+    echo Download: https://git-scm.com/download/win
+    pause
+    exit /b
+)
+echo [INFO] git detected.
+echo.
+
 :: 2. Install all dependencies (Python, venv, and packages are handled automatically by uv)
 echo [1/2] Installing Dependencies (This might take a while on first run)...
 echo       uv will automatically download Python if needed.

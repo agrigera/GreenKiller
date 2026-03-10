@@ -56,7 +56,7 @@ def is_image_file(filename: str) -> bool:
 
 
 def is_video_file(filename: str) -> bool:
-    return filename.lower().endswith((".mp4", ".mov", ".avi", ".mkv"))
+    return filename.lower().endswith((".mp4", ".mov", ".avi", ".mkv", ".mxf", ".webm", ".m4v"))
 
 
 def map_path(win_path: str) -> str:
