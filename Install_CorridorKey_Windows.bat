@@ -51,6 +51,12 @@ if not exist "CorridorKeyModule\checkpoints" mkdir "CorridorKeyModule\checkpoint
 if not exist "CorridorKeyModule\checkpoints\CorridorKey.pth" (
     echo Downloading CorridorKey.pth...
     curl.exe -L -o "CorridorKeyModule\checkpoints\CorridorKey.pth" "https://huggingface.co/nikopueringer/CorridorKey_v1.0/resolve/main/CorridorKey_v1.0.pth"
+    if %errorlevel% neq 0 (
+        echo [ERROR] Failed to download CorridorKey.pth.
+        echo Please verify your internet connection and HuggingFace availability.
+        pause
+        exit /b
+    )
 ) else (
     echo CorridorKey.pth already exists!
 )

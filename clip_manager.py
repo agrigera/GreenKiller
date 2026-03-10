@@ -16,7 +16,7 @@ os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 import cv2
 import numpy as np
 
-from backend.frame_io import EXR_WRITE_FLAGS
+from backend.frame_io import EXR_WRITE_FLAGS, read_image_frame
 from device_utils import resolve_device
 
 if TYPE_CHECKING:
@@ -625,21 +625,9 @@ def run_inference(
             else:
                 fpath = os.path.join(clip.input_asset.path, input_files[i])
                 input_stem = os.path.splitext(input_files[i])[0]
-
-                is_exr = fpath.lower().endswith(".exr")
-                if is_exr:
-                    img_linear = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
-                    if img_linear is None:
-                        continue
-                    img_linear_rgb = cv2.cvtColor(img_linear, cv2.COLOR_BGR2RGB)
-                    # Support overriding EXR behavior if user picked 's'
-                    img_srgb = np.maximum(img_linear_rgb, 0.0)
-                else:
-                    img_bgr = cv2.imread(fpath)
-                    if img_bgr is None:
-                        continue
-                    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-                    img_srgb = img_rgb.astype(np.float32) / 255.0
+                img_srgb = read_image_frame(fpath, gamma_correct_exr=not input_is_linear)
+                if img_srgb is None:
+                    continue
 
             # 2. Read Alpha (Mask)
             mask_linear = None

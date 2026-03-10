@@ -344,6 +344,25 @@ def interactive_wizard(win_path: str, device: str | None = None) -> None:
             )
             raise typer.Exit(code=1)
 
+    # Accept drag-and-drop of either a folder or a single video file.
+    # If a file is passed, process its parent directory as the batch root.
+    if os.path.isfile(process_path):
+        if not is_video_file(process_path):
+            console.print(
+                f"\n[bold red]ERROR:[/bold red] File is not a supported video format:"
+                f" [bold]{os.path.basename(process_path)}[/bold]"
+            )
+            raise typer.Exit(code=1)
+        parent_dir = os.path.dirname(process_path)
+        if not parent_dir:
+            console.print("\n[bold red]ERROR:[/bold red] Could not resolve parent directory for the input file.")
+            raise typer.Exit(code=1)
+        console.print(
+            f"Detected input file [bold]{os.path.basename(process_path)}[/bold]."
+            f" Using parent folder: [bold]{parent_dir}[/bold]"
+        )
+        process_path = parent_dir
+
     # 2. Analyze — shot or project?
     target_is_shot = False
     if os.path.exists(os.path.join(process_path, "Input")) or glob.glob(os.path.join(process_path, "Input.*")):

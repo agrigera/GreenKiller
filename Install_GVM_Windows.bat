@@ -13,12 +13,26 @@ if not exist ".venv" (
     exit /b
 )
 
+where uv >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [ERROR] uv is not available in this terminal session.
+    echo Close this terminal, open a new one, and try again.
+    pause
+    exit /b
+)
+
 :: 1. Download Weights (all Python deps are already installed by uv sync)
 echo [1/1] Downloading GVM Model Weights (WARNING: Massive 80GB+ Download)...
 if not exist "gvm_core\weights" mkdir "gvm_core\weights"
 
 echo Downloading GVM weights from HuggingFace...
 uv run hf download geyongtao/gvm --local-dir gvm_core\weights
+if %errorlevel% neq 0 (
+    echo [ERROR] Failed to download GVM weights.
+    echo Ensure you have internet access and a valid HuggingFace session if required.
+    pause
+    exit /b
+)
 
 echo.
 echo ===================================================

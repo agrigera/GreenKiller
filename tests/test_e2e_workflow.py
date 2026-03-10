@@ -13,9 +13,14 @@ Why integration-test run_inference?
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+
+# Must be set before importing cv2 so OpenEXR codec is enabled in this process.
+os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+import cv2
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -116,3 +121,43 @@ class TestE2EInferenceWorkflow:
         # No engine calls — clip was filtered out before inference
         mock_engine.process_frame.assert_not_called()
         assert not (tmp_clip_dir / "shot_b" / "Output").exists()
+
+    def test_exr_input_respects_user_gamma_setting(self, tmp_path):
+        """EXR reads must honor InferenceSettings.input_is_linear.
+
+        For EXR input sequences, run_inference should request gamma correction
+        only when user selected sRGB input (input_is_linear=False).
+        """
+        from clip_manager import ClipEntry, InferenceSettings, run_inference
+
+        shot = tmp_path / "shot_exr"
+        (shot / "Input").mkdir(parents=True)
+        (shot / "AlphaHint").mkdir(parents=True)
+        (shot / "VideoMamaMaskHint").mkdir(parents=True)
+
+        # File existence is discovered by extension; actual pixel read is mocked.
+        (shot / "Input" / "frame_0000.exr").write_bytes(b"dummy")
+
+        tiny_mask = np.zeros((4, 4), dtype=np.uint8)
+        tiny_mask[1:3, 1:3] = 255
+        cv2.imwrite(str(shot / "AlphaHint" / "frame_0000.png"), tiny_mask)
+
+        entry = ClipEntry("shot_exr", str(shot))
+        entry.find_assets()
+
+        fake_img = np.full((4, 4, 3), 0.5, dtype=np.float32)
+        mock_engine = MagicMock()
+        mock_engine.process_frame.return_value = _fake_result()
+
+        with patch("CorridorKeyModule.backend.create_engine", return_value=mock_engine):
+            with patch("clip_manager.read_image_frame", return_value=fake_img) as mock_read:
+                run_inference([entry], device="cpu", settings=InferenceSettings(input_is_linear=False))
+                assert mock_read.call_count == 1
+                assert mock_read.call_args.kwargs["gamma_correct_exr"] is True
+
+        # Re-run with user saying input is linear: gamma correction must be off.
+        with patch("CorridorKeyModule.backend.create_engine", return_value=mock_engine):
+            with patch("clip_manager.read_image_frame", return_value=fake_img) as mock_read:
+                run_inference([entry], device="cpu", settings=InferenceSettings(input_is_linear=True))
+                assert mock_read.call_count == 1
+                assert mock_read.call_args.kwargs["gamma_correct_exr"] is False

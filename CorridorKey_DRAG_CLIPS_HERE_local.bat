@@ -28,6 +28,13 @@ echo Target: "%WIN_PATH%"
 
 REM Run via uv entry point (handles the virtual environment automatically)
 cd /d "%SCRIPT_DIR%"
+where uv >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [ERROR] uv is not available in this terminal session.
+    echo Please run Install_CorridorKey_Windows.bat first or reopen terminal after installing uv.
+    pause
+    exit /b
+)
 uv run corridorkey wizard "%WIN_PATH%"
 
 pause
