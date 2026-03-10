@@ -39,6 +39,31 @@ if %errorlevel% neq 0 (
     exit /b
 )
 
+:: Verify required files are present (avoid silent partial installs)
+set "MISSING_GVM_FILES="
+for %%F in (
+    "gvm_core\weights\vae\config.json"
+    "gvm_core\weights\vae\diffusion_pytorch_model.safetensors"
+    "gvm_core\weights\scheduler\scheduler_config.json"
+    "gvm_core\weights\unet\config.json"
+    "gvm_core\weights\unet\diffusion_pytorch_model.safetensors"
+) do (
+    if not exist %%~F (
+        echo [ERROR] Missing required GVM file: %%~F
+        set "MISSING_GVM_FILES=1"
+    )
+)
+
+if defined MISSING_GVM_FILES (
+    echo.
+    echo [ERROR] GVM install incomplete. Re-run this script and make sure the download finishes.
+    echo         You may also need to free disk space or authenticate to HuggingFace.
+    pause
+    exit /b
+)
+
+echo [INFO] GVM weights verified.
+
 echo.
 echo ===================================================
 echo   GVM Setup Complete!
